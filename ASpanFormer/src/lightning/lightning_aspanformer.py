@@ -9,19 +9,19 @@ import numpy as np
 import pytorch_lightning as pl
 from matplotlib import pyplot as plt
 
-from ASpanFormer.src.ASpanFormer.aspanformer import ASpanFormer
-from ASpanFormer.src.ASpanFormer.utils.supervision import compute_supervision_coarse, compute_supervision_fine
-from ASpanFormer.src.losses.aspan_loss import ASpanLoss
-from ASpanFormer.src.optimizers import build_optimizer, build_scheduler
-from ASpanFormer.src.utils.metrics import (
+from ...src.ASpanFormer.aspanformer import ASpanFormer
+from ...src.ASpanFormer.utils.supervision import compute_supervision_coarse, compute_supervision_fine
+from ...src.losses.aspan_loss import ASpanLoss
+from ...src.optimizers import build_optimizer, build_scheduler
+from ...src.utils.metrics import (
     compute_symmetrical_epipolar_errors,compute_symmetrical_epipolar_errors_offset_bidirectional,
     compute_pose_errors,
     aggregate_metrics
 )
-from ASpanFormer.src.utils.plotting import make_matching_figures,make_matching_figures_offset
-from ASpanFormer.src.utils.comm import gather, all_gather
-from ASpanFormer.src.utils.misc import lower_config, flattenList
-from ASpanFormer.src.utils.profiler import PassThroughProfiler
+from ...src.utils.plotting import make_matching_figures,make_matching_figures_offset
+from ...src.utils.comm import gather, all_gather
+from ...src.utils.misc import lower_config, flattenList
+from ...src.utils.profiler import PassThroughProfiler
 
 
 class PL_ASpanFormer(pl.LightningModule):

@@ -10,16 +10,21 @@ import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
 
+import rasterio
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+from PIL import Image
 
-from torch.utils.data import DataLoader
-from core import optimizer
+from torch.utils.data import DataLoader, Dataset
+from torchvision.transforms import RandomRotation, RandomResizedCrop, ToTensor
+
+from FlowFormer.core.utils.flow_transforms import Compose
+
 import evaluate_FlowFormer as evaluate
-import evaluate_FlowFormer_tile as evaluate_tile
-import core.datasets as datasets
+
+
 from core.loss import sequence_loss
 from core.optimizer import fetch_optimizer
 from core.utils.misc import process_cfg
@@ -30,6 +35,87 @@ from core.utils.logger import Logger
 
 # from core.FlowFormer import FlowFormer
 from core.FlowFormer import build_flowformer
+
+
+def get_list():
+    path_of_the_directory = './data/dataset/'
+    paths = []
+    for filename in os.listdir(path_of_the_directory):
+        if filename[0] != ".":
+            f = os.path.join(path_of_the_directory, filename)
+            if len(os.listdir(f)) > 3:
+                if not os.path.isfile(f):
+                    lst = sorted([os.path.abspath(os.path.join(f, p)) for p in os.listdir(f)])
+                    lst = [item for item in lst if "az_rg" not in item and "._" not in item]
+                    if len(lst) == 4:
+                        paths.append(lst)
+    return paths
+
+
+def normalize(band):
+    band_min, band_max = (np.nanmin(band), np.nanmax(band))
+    return ((band - band_min) / ((band_max - band_min)))
+
+
+def gammacorr(band):
+    gamma = 2
+    return np.power(band, 1 / gamma)
+def normalize_sar(band, percentile):
+  p = np.nanpercentile(band,percentile)
+  img = band.clip(0,p)
+  img_n = (img-np.nanmin(img))/(np.nanmax(img)-np.nanmin(img))
+  img_n[img_n==np.nan] = 0
+  return img_n
+
+def create_RGB_composite(red,green,blue):
+
+  red_g=gammacorr(red)
+  blue_g=gammacorr(blue)
+  green_g=gammacorr(green)
+
+  red_gn = normalize(red_g)
+  green_gn = normalize(green_g)
+  blue_gn = normalize(blue_g)
+
+  rgb_composite= np.dstack((red_gn, green_gn, blue_gn))
+  return rgb_composite
+class UAVSARDataset(Dataset):
+    def __init__(self, root_dir, transform=None):
+
+        self.sample_paths = sorted(list(get_list()))
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.sample_paths)
+
+    def __getitem__(self, idx):
+        #sample_dir = self.sample_paths[idx]
+        path_s2, sentinel_path, llh_path, uavsar_path= self.sample_paths[idx]
+        # Load uavsar.jpg
+
+        uavsar_img = Image.open(uavsar_path)
+
+        # Load uavsar.llh
+        llh = np.load(llh_path)
+
+        # Load sentinel1.tif
+        s1_img = normalize_sar(rasterio.open(sentinel_path).read()[0, :, :], 97)
+        sentinel2= rasterio.open(sentinel_path).read()
+        s2_norm_rgb = create_RGB_composite(sentinel2[3, :, :], sentinel2[2, :, :], sentinel2[1, :, :])
+
+
+
+        if self.transform:
+            uavsar_img, llh = self.transform(uavsar_img, llh)
+
+        return uavsar_img, llh,s1_img,rasterio.open(sentinel_path)
+
+# Your function to fetch dataloader
+def fetch_dataloader(cfg):
+    transform = Compose([RandomRotation(30), RandomResizedCrop(224), ToTensor()])
+    dataset = UAVSARDataset("../Tester/data/dataset", transform=transform)
+    dataloader = DataLoader(dataset, batch_size=cfg.batch_size, shuffle=True, num_workers=cfg.num_workers)
+    return dataloader
 
 try:
     from torch.cuda.amp import GradScaler
@@ -64,7 +150,7 @@ def train(cfg):
     model.cuda()
     model.train()
 
-    train_loader = datasets.fetch_dataloader(cfg)
+    train_loader = fetch_dataloader(cfg)
     optimizer, scheduler = fetch_optimizer(model, cfg.trainer)
 
     total_steps = 0
@@ -78,16 +164,18 @@ def train(cfg):
 
         for i_batch, data_blob in enumerate(train_loader):
             optimizer.zero_grad()
-            image1, image2, flow, valid = [x.cuda() for x in data_blob]
+            uavsar_img, llh, s1_img, data_sentinel = data_blob
 
             if cfg.add_noise:
                 stdv = np.random.uniform(0.0, 5.0)
-                image1 = (image1 + stdv * torch.randn(*image1.shape).cuda()).clamp(0.0, 255.0)
-                image2 = (image2 + stdv * torch.randn(*image2.shape).cuda()).clamp(0.0, 255.0)
-
+                uavsar_img = (uavsar_img + stdv * torch.randn(*uavsar_img.shape).cuda()).clamp(0.0, 255.0)
+                s1_img = (s1_img + stdv * torch.randn(*s1_img .shape).cuda()).clamp(0.0, 255.0)
+            print(uavsar_img.shape,s1_img.shape)
+            uavsar_img, s1_img = torch.tensor( uavsar_img).cuda(), torch.tensor(s1_img).cuda()
             output = {}
-            flow_predictions = model(image1, image2, output)
-            loss, metrics = sequence_loss(flow_predictions, flow, valid, cfg)
+            flow_predictions = model(uavsar_img , s1_img, output)
+            print(flow_predictions.shape)
+            loss, metrics = sequence_loss(flow_predictions, None, None, cfg)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.trainer.clip)
@@ -143,16 +231,16 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    if args.stage == 'chairs':
-        from configs.default import get_cfg
-    elif args.stage == 'things':
-        from configs.things import get_cfg
-    elif args.stage == 'sintel':
-        from configs.sintel import get_cfg
-    elif args.stage == 'kitti':
-        from configs.kitti import get_cfg
-    elif args.stage == 'autoflow':
-        from configs.autoflow import get_cfg
+    #if args.stage == 'chairs':
+    from configs.default import get_cfg
+    #elif args.stage == 'things':
+    #    from configs.things import get_cfg
+    #elif args.stage == 'sintel':
+    #    from configs.sintel import get_cfg
+    #elif args.stage == 'kitti':
+    #    from configs.kitti import get_cfg
+    #elif args.stage == 'autoflow':
+    #    from configs.autoflow import get_cfg
 
     cfg = get_cfg()
     cfg.update(vars(args))

@@ -41,7 +41,7 @@ def get_matcher(path,small):
 
     model = torch.nn.DataParallel(build_flowformer(cfg))
     model.load_state_dict(torch.load(path))
-
+    #model = model.module
     print(args)
 
     model.cuda()

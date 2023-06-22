@@ -24,7 +24,7 @@ class Matchformer(nn.Module):
             'bs': data['image0'].size(0),
             'hw0_i': data['image0'].shape[2:], 'hw1_i': data['image1'].shape[2:]
         })
-        print(data['image0'].shape,data['image1'].shape)
+
         mask_c0 = mask_c1 = None  # mask is useful in training
         if 'mask0' in data:
             mask_c0, mask_c1 = data['mask0'].flatten(-2), data['mask1'].flatten(-2)
@@ -51,5 +51,4 @@ class Matchformer(nn.Module):
 
         # match fine-level
         self.fine_matching(feat_f0_unfold, feat_f1_unfold, data)
-
         

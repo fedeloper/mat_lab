@@ -11,9 +11,7 @@ import pytorch_lightning as pl
 def get_matcher():
     config = get_cfg_defaults()
     pl.seed_everything(config.TRAINER.SEED)  # reproducibility
-    threshold = None
-    if threshold is not None:
-        config.LOFTR.MATCH_COARSE.THR = threshold
+
     matcher = PL_LoFTR(config, pretrained_ckpt="../MatchFormer/weights/outdoor-lite-SEA.ckpt", dump_dir=".")
 
     return matcher.eval()

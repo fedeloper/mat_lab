@@ -149,8 +149,13 @@ class Tester():
 
             #assert False
             llh = np.load(path_llh_uavsar)
+            min_lat, max_lat = np.min(llh[:, :, 0]), np.max(llh[:, :, 0])
+            min_lon, max_lon = np.min(llh[:, :, 1]), np.max(llh[:, :, 1])
 
             llh, uavsar = rotate_llh_map(uavsar, llh, path_s1)
+            min_lat, max_lat = np.min(llh[:, :, 0]), np.max(llh[:, :, 0])
+            min_lon, max_lon = np.min(llh[:, :, 1]), np.max(llh[:, :, 1])
+
             s1_norm_log = rasterio.open(path_s1).read()[0, :, :]#normalize_sar(, 97)
 
 
@@ -247,7 +252,7 @@ class Tester_Pytorch_MatchFormer(Tester):
             self.matcher = matcher.to(device)#get_matcher()
             self.device=device
         def make_inference(self,image0:np.numarray,image1:np.numarray)->Tuple[np.numarray,np.numarray,np.numarray]:
-            print(image0.shape)
+
             img1_resized,img2_resized,original_shape1 , original_shape2,target_size = resize(image0,image1)
             batch = {'image0': torch.from_numpy(img1_resized).to(self.device).float(), 'image1': torch.from_numpy(img2_resized).to(self.device).float()}
             self.matcher.matcher(batch)

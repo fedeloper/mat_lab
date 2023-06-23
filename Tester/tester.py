@@ -1,6 +1,7 @@
 import gc
 import os
 import pathlib
+from os.path import exists
 from typing import Tuple
 
 import PIL
@@ -13,8 +14,9 @@ import torch
 import torch.onnx.utils
 from PIL import Image
 from imageio import imread
+from line_profiler_pycharm import profile
 from matplotlib import pyplot as plt, cm
-from memory_profiler import profile
+
 from pyproj import Transformer
 from rasterio import transform as tform
 from rasterio import warp
@@ -170,45 +172,97 @@ def absolute_reference_model2dataset_sentinel(mkpts0_r,search_size,sh1,angle_rot
     return i_slc,j_slc
 
 
-def tranform_approx(llh, sh0,num_points,fc):
-    # Number of points
 
-    from os.path import exists
+import numpy as np
+import rasterio
 
+def create_geotiff_(llh_matrix, sh0, n_sample, output_filename):
+    # Ensure llh_matrix and image have compatible shapes
+    if llh_matrix.shape[:2] != sh0:
+        raise ValueError("llh_matrix and image must have compatible shapes.")
 
+    # Extract dimensions
+    w, h = sh0
 
-    if not exists(fc+".tiff"):
-        # Generate arrays of random x and y indices
-        x_indices = np.random.randint(0, llh.shape[0], num_points)
-        y_indices = np.random.randint(0, llh.shape[1], num_points)
+    # Create GCPs
+    indices = [(i, j) for i in range(w) for j in range(h)]
+    random_indices = random.sample(indices, n_sample)
+    gcps = [GroundControlPoint(row=i, col=j, x=llh_matrix[i, j, 0], y=llh_matrix[i, j, 1])
+            for i, j in random_indices]
 
-        # Get the corresponding lat, lon and h values
-        lat_lon_h_values = llh[x_indices, y_indices]
+    # Create transform from GCPs
+    transform = from_gcps(gcps)
 
-        # Create the GroundControlPoint objects
-        gcps = [GroundControlPoint(row=x, col=y, x=lat, y=lon)
-                for i, ((x, y), (lat, lon, h)) in enumerate(zip(zip(x_indices, y_indices), lat_lon_h_values))]
-        transform = from_gcps(gcps, )
+    # Write GeoTIFF
+    with rasterio.open(output_filename, 'w', driver='GTiff', height=h, width=w, count=1, dtype=np.uint8,
+                       crs=4326, transform=transform) as dst:
+        return dst
+
+@profile
+def create_geotiff(llh,idx,mode='border',num_points=100000):
+    # Generate arrays of random x and y indices
+
+    if mode == 'border':
+        min_lat, max_lat = np.min(llh[:, :, 0]), np.max(llh[:, :, 0])
+        min_lon, max_lon = np.min(llh[:, :, 1]), np.max(llh[:, :, 1])
+        # Define the pixel size in geographical units
+        xres = (max_lon - min_lon) / llh.shape[1]
+        yres = (max_lat - min_lat) / llh.shape[0]
+        # Create transform
+        transform = rasterio.transform.from_origin(min_lon, max_lat, xres, yres)
         # Write to a new raster file
         with rasterio.open(
-                fc + ".tiff", 'w',
-            driver='GTiff',
-            height=sh0[0],
-            width=sh0[1],
-            count=1,
-            dtype=np.uint8,
-            crs=4326,
-            transform=transform,
+                'output.tiff', 'w',
+                driver='GTiff',
+                height=llh.shape[0],
+                width=llh.shape[1],
+                count=1,
+                dtype=np.uint8,
+                crs=4326,
+                transform=transform,
         ) as dst:
             return dst
     else:
-        with rasterio.open(
-                fc + ".tiff"
 
-        ) as dst:
-            return dst
+        if  not exists(str(idx) + ".tiff"):
+            # Generate arrays of random x and y indices
+            x_indices = np.random.randint(0, llh.shape[0], num_points)
+            y_indices = np.random.randint(0, llh.shape[1], num_points)
 
-def get_metrics(mkpts0_r, mkpts1_r, S1, llh, search_size, sh0, sh1, off_x, off_y,idx, angle_rotation=0,approximate=False):
+            # Get the corresponding lat, lon and h values
+            lat_lon_h_values = llh[x_indices, y_indices]
+
+            # Create the GroundControlPoint objects
+            gcps = [GroundControlPoint(row=x, col=y, x=lon, y=lat,z=h)
+                    for i, ((x, y), (lat, lon, h)) in enumerate(zip(zip(x_indices, y_indices), lat_lon_h_values))]
+            transform = from_gcps(gcps, )
+            # Write to a new raster file
+            with rasterio.open(
+                    str(idx) + ".tiff", 'w',
+                    driver='GTiff',
+                    height=llh.shape[0],
+                    width=llh.shape[1],
+                    count=1,
+                    dtype=np.uint8,
+                    crs=4326,
+                    transform=transform,
+            ) as dst:
+                return dst
+        else:
+            with rasterio.open(
+                    str(idx) + ".tiff"
+
+            ) as dst:
+                return dst
+
+
+
+
+
+#lon,lat = create_geotiff(llh, sh0).xy([0],[0])
+#diffx = llh[0,0,0]-lat # comparing latitude with latitude
+#diffy = llh[0,0,1]-lon # comparing longitude with longitude
+def get_metrics(mkpts0_r, mkpts1_r, S1, llh, search_size, sh0, sh1, off_x, off_y,idx, angle_rotation=0,approximate=True):
     """
     Computes metrics for comparing reference points in different coordinate systems.
 
@@ -233,10 +287,16 @@ def get_metrics(mkpts0_r, mkpts1_r, S1, llh, search_size, sh0, sh1, off_x, off_y
     i_grd, j_grd = i_grd.astype(int), j_grd.astype(int)
     # Convert reference from search windows to dataset Sentinel-1 grid
     i_slc, j_slc = absolute_reference_model2dataset_sentinel(mkpts0_r, search_size, sh1, angle_rotation)
-    lat,lon = llh[:, :, 0][i_grd, j_grd], llh[:, :, 1][i_grd, j_grd]
+
+    lat, lon,h = llh[i_grd, j_grd].T
+
 
     if approximate:
-        lat, lon = tranform_approx(llh, sh0, 10000, "1").xy(i_grd, j_grd)
+        lon,lat = xy_np( create_geotiff(llh, idx,mode="CP").transform,j_grd, i_grd,)
+        #lon, lat = create_geotiff(llh, idx,mode="CP").xy()
+        print("predicted", lat[0], lon[0])
+        #lon1, lat1 = create_geotiff(llh, sh0, 10000, "1").xy(j_grd, i_grd)
+        #print("predicted", lat1[0], lon1[0])
 
     i_ref, j_ref = S1.index(
         *Transformer.from_crs(4326, S1.crs.to_epsg()).transform(lat,lon))
@@ -245,6 +305,49 @@ def get_metrics(mkpts0_r, mkpts1_r, S1, llh, search_size, sh0, sh1, off_x, off_y
     return np.hypot(i_slc - i_ref, j_slc - j_ref).mean()
 
 
+def to_numpy2(transform):
+    return np.array([transform.a,
+    transform.b,
+    transform.c,
+    transform.d,
+    transform.e,
+    transform.f, 0, 0, 1], dtype='float64').reshape((3,3))
+
+def to_numpy2(transform):
+    return np.array([transform.a,
+    transform.b,
+    transform.c,
+    transform.d,
+    transform.e,
+    transform.f, 0, 0, 1], dtype='float64').reshape((3,3))
+
+def xy_np(transform, rows, cols, offset='center'):
+    if isinstance(rows, int) and isinstance(cols, int):
+        pts = np.array([[rows, cols, 1]]).T
+    else:
+        assert len(rows) == len(cols)
+        pts = np.ones((3, len(rows)), dtype=int)
+        pts[0] = rows
+        pts[1] = cols
+
+    if offset == 'center':
+        coff, roff = (0.5, 0.5)
+    elif offset == 'ul':
+        coff, roff = (0, 0)
+    elif offset == 'ur':
+        coff, roff = (1, 0)
+    elif offset == 'll':
+        coff, roff = (0, 1)
+    elif offset == 'lr':
+        coff, roff = (1, 1)
+    else:
+        raise ValueError("Invalid offset")
+
+    _transnp = to_numpy2(transform)
+    _translt = to_numpy2(transform.translation(coff, roff))
+    locs = _transnp @ _translt @ pts
+    return locs[0].tolist(), locs[1].tolist()
+@profile
 def get_metrics_differentiable(mkpts0_r, mkpts1_r, S1, llh, search_size, sh0, sh1, off_x, off_y,idx, angle_rotation=0,approximate=False,device="cuda"):
     """
     Computes metrics for comparing reference points in different coordinate systems.
@@ -270,15 +373,22 @@ def get_metrics_differentiable(mkpts0_r, mkpts1_r, S1, llh, search_size, sh0, sh
     xxx =mkpts1_r[:, 1] + off_x
     yyy =mkpts1_r[:, 0] + off_y
 
+
     #i_grd, j_grd = absolute_reference_model2dataset_uavsar(mkpts1_r, off_x, off_y)
 
     # Convert reference from search windows to dataset Sentinel-1 grid
     i_slc, j_slc = absolute_reference_model2dataset_sentinel(mkpts0_r, search_size, sh1, angle_rotation)
 
 
-    lat, lon = S1.xy(i_slc, j_slc)
+
+    #lat, lon = S1.xy(i_slc, j_slc)
+    lat, lon = xy_np(S1.transform,j_slc, i_slc)
     lat,lon = Transformer.from_crs( S1.crs.to_epsg(),4326).transform(lat,lon)
-    j_slc, i_slc = tranform_approx(llh, sh0, 100000, str(idx)).index(lat,lon)
+
+
+
+    j_slc, i_slc = create_geotiff(llh, idx, mode="CP").index(lon,lat)
+
     grd = torch.dstack([torch.tensor(i_slc).to(device),torch.tensor(j_slc).to(device)])
 
 
@@ -453,7 +563,8 @@ def postproces_and_metric(conf, mkpts0, mkpts1, img0, img1, ph, searching_window
         uavsar, llh, S1, s1_norm_log = ph
 
 
-        rmse = get_metrics(np.array(mk0_in, copy=True)[:threshold_inliers],np.array(mk1_in, copy=True)[:threshold_inliers], S1,llh, (searching_window_w, searching_window_h),   sh0, sh1, off_x, off_y,idx, angle_rotation=angle_rotation)
+
+        rmse = get_metrics_differentiable(np.array(mk0_in, copy=True)[:threshold_inliers],np.array(mk1_in, copy=True)[:threshold_inliers], S1,llh, (searching_window_w, searching_window_h),   sh0=sh0, sh1=sh1, off_x=off_x, off_y=off_y,idx=idx, angle_rotation=angle_rotation)
 
         conf.update({'rmse': rmse, 'inliers': n_inliers})
         save_pdf=False
@@ -475,7 +586,7 @@ def postproces_and_metric(conf, mkpts0, mkpts1, img0, img1, ph, searching_window
 def rotate_image(image, angle):
   image_center = tuple(np.array(image.shape[1::-1]) / 2)
   rot_mat = cv2.getRotationMatrix2D(image_center, angle, 1.0)
-  result = cv2.warpAffine(image, rot_mat, image.shape[1::-1], flags=cv2.INTER_LINEAR)
+  result = cv2.warpAffine(image, rot_mat, image.shape[1::-1], flags=cv2.INTER_LINEAR,borderMode=cv2.BORDER_TRANSPARENT)
   return result
 
 import cv2
@@ -726,6 +837,16 @@ from scipy.ndimage import rotate
 
 
 
+from PIL import Image
+import numpy as np
+def rotate_image(image, angle):
+  image_center = tuple(np.array(image.shape[1::-1]) / 2)
+  rot_mat = cv2.getRotationMatrix2D(image_center, angle, 1.0)
+  result = cv2.warpAffine(image, rot_mat, image.shape[1::-1], flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_REFLECT)
+  return result
+from PIL import Image
+import numpy as np
+@profile
 def rotate_llh_map(img, llh, geotif_path):
     # Read the GeoTIFF file
     with rasterio.open(geotif_path) as geotif:
@@ -744,10 +865,20 @@ def rotate_llh_map(img, llh, geotif_path):
     # Calculate the difference in angles
     angle_diff = angle_geotif - angle_llh + 90
 
-    # Rotate the image and the llh to match the GeoTIFF's orientation
-    img_rotated = rotate(img, angle_diff, reshape=False, mode='nearest')
-    llh_rotated = np.empty_like(llh)
-    for i in range(llh.shape[2]):
-        llh_rotated[:, :, i] = rotate(llh[:, :, i], angle_diff, reshape=False, mode='nearest')
+    # Convert the NumPy array to PIL Image
+    #img_pil = Image.fromarray(img)
+
+    # Rotate the image
+    img_rotated = rotate_image(img,angle_diff)#img_pil.rotate(angle_diff, resample=Image.BICUBIC, expand=False)
+
+    # Convert the PIL Image back to NumPy array
+    img_rotated = np.array(img_rotated)
+
+    # Rotate each channel of llh
+    llh_rotated =rotate_image(llh,angle_diff)
+    #for i in range(llh.shape[2]):
+     #   llh_channel = llh[:, :, i]
+     #   llh_channel_rotated = Image.fromarray(llh_channel).rotate(angle_diff, resample=Image.BICUBIC, expand=False)
+     #   llh_rotated[:, :, i] = np.array(llh_channel_rotated)
 
     return llh_rotated, img_rotated

@@ -18,7 +18,7 @@ from line_profiler_pycharm import profile
 from matplotlib import pyplot as plt, cm
 
 from pyproj import Transformer
-from rasterio import transform as tform
+from rasterio import transform as tform, MemoryFile
 from rasterio import warp
 from rasterio.control import GroundControlPoint
 from rasterio.crs import CRS
@@ -171,10 +171,8 @@ def absolute_reference_model2dataset_sentinel(mkpts0_r,search_size,sh1,angle_rot
     j_slc += (sh1[1] / 2 - search_size[1] / 2)
     return i_slc,j_slc
 
+import _pickle as pickle
 
-
-import numpy as np
-import rasterio
 
 def create_geotiff_(llh_matrix, sh0, n_sample, output_filename):
     # Ensure llh_matrix and image have compatible shapes
@@ -224,21 +222,30 @@ def create_geotiff(llh,idx,mode='border',num_points=100000):
             return dst
     else:
 
-        if  not exists(str(idx) + ".tiff"):
+            if os.path.isfile(str(idx)+".pkl"):
+                with open(str(idx)+".pkl", "rb") as fp:  # Unpickling
+                    transform = pickle.load(fp)
+            else:
+                #print("not existing",str(idx)+".pkl")
+                #assert False
             # Generate arrays of random x and y indices
-            x_indices = np.random.randint(0, llh.shape[0], num_points)
-            y_indices = np.random.randint(0, llh.shape[1], num_points)
+                x_indices = np.random.randint(0, llh.shape[0], num_points)
+                y_indices = np.random.randint(0, llh.shape[1], num_points)
 
-            # Get the corresponding lat, lon and h values
-            lat_lon_h_values = llh[x_indices, y_indices]
+                # Get the corresponding lat, lon and h values
+                lat_lon_h_values = llh[x_indices, y_indices]
 
-            # Create the GroundControlPoint objects
-            gcps = [GroundControlPoint(row=x, col=y, x=lon, y=lat,z=h)
-                    for i, ((x, y), (lat, lon, h)) in enumerate(zip(zip(x_indices, y_indices), lat_lon_h_values))]
-            transform = from_gcps(gcps, )
+                # Create the GroundControlPoint objects
+                gcps = [GroundControlPoint(row=x, col=y, x=lon, y=lat, z=h)
+                        for ((x, y), (lat, lon, h)) in zip(zip(x_indices, y_indices), lat_lon_h_values)]
+
+                transform = from_gcps(gcps)
+
+                with open(str(idx)+".pkl", "wb") as fp:  # Pickling
+                    pickle.dump(transform, fp)
             # Write to a new raster file
-            with rasterio.open(
-                    str(idx) + ".tiff", 'w',
+            with MemoryFile().open(
+                   #str(idx) + ".tiff", 'w',
                     driver='GTiff',
                     height=llh.shape[0],
                     width=llh.shape[1],
@@ -248,12 +255,7 @@ def create_geotiff(llh,idx,mode='border',num_points=100000):
                     transform=transform,
             ) as dst:
                 return dst
-        else:
-            with rasterio.open(
-                    str(idx) + ".tiff"
 
-            ) as dst:
-                return dst
 
 
 
@@ -294,7 +296,7 @@ def get_metrics(mkpts0_r, mkpts1_r, S1, llh, search_size, sh0, sh1, off_x, off_y
     if approximate:
         lon,lat = xy_np( create_geotiff(llh, idx,mode="CP").transform,j_grd, i_grd,)
         #lon, lat = create_geotiff(llh, idx,mode="CP").xy()
-        print("predicted", lat[0], lon[0])
+        #print("predicted", lat[0], lon[0])
         #lon1, lat1 = create_geotiff(llh, sh0, 10000, "1").xy(j_grd, i_grd)
         #print("predicted", lat1[0], lon1[0])
 
@@ -370,6 +372,7 @@ def get_metrics_differentiable(mkpts0_r, mkpts1_r, S1, llh, search_size, sh0, sh
     #if mkpts1_r.isnan().any() or mkpts0_r.isnan().any():
     #    print("nan is in before metric")
     # Convert reference from patch to dataset uavsar grid
+    #print(mkpts1_r.requires_grad,"m1")
     xxx =mkpts1_r[:, 1] + off_x
     yyy =mkpts1_r[:, 0] + off_y
 
@@ -382,7 +385,7 @@ def get_metrics_differentiable(mkpts0_r, mkpts1_r, S1, llh, search_size, sh0, sh
 
 
     #lat, lon = S1.xy(i_slc, j_slc)
-    lat, lon = xy_np(S1.transform,j_slc, i_slc)
+    lat, lon = xy_np(S1.transform,j_slc.detach().cpu(), i_slc.detach().cpu())
     lat,lon = Transformer.from_crs( S1.crs.to_epsg(),4326).transform(lat,lon)
 
 
@@ -400,10 +403,7 @@ def get_metrics_differentiable(mkpts0_r, mkpts1_r, S1, llh, search_size, sh0, sh
         return torch.sqrt(torch.nn.MSELoss()(grd.float(), pred)).item()
     else:
         pred = torch.dstack([yyy, xxx])
-    #print(grd.shape,mkpts1_r.shape)
-    # Compute the mean distance between matched keypoints
-    #if grd.float().isnan().any() or pred.isnan().any() or grd.float().isinf().any() or pred.isinf().any():
-    #    print("nan in end output")
+        #print(xxx.requires_grad,pred.requires_grad,"aooooooooooooooo")
         return torch.nn.MSELoss()(grd.float(),pred)
 
 
@@ -624,10 +624,10 @@ def predict(matcher, img0, img1, angle_rotation=0, kernel_size=3):
         if SHOW_INFERENCE_SPEED:
             import time
             st = time.time()
-        try:
-            mkpts0, mkpts1, mconf = matcher(img0, img1)
-        except:
-            return None
+        #try:
+        mkpts0, mkpts1, mconf = matcher(img0, img1)
+        #except:
+        #    return None
        # print("chec valid",1)
        # check_valid(mkpts0,mkpts1,sh0,sh1)
         if SHOW_INFERENCE_SPEED:
@@ -656,7 +656,6 @@ def lee_filter(img, size):
 
 def do_test(matcher_in, ph, idx,size_search=(640, 480), size_patch=(int(180 * 1.333333), int(180)),name_model="Noname", threshold_inliers=5,
             configs_ransac=None, verbose=True, random_select=False,angle_rotation=0):
-
 
     patch,search,sh0,sh1,off_x,off_y = get_sample(ph, size_search, size_patch,rnd=False)
     results = None

@@ -1,0 +1,7 @@
+__pycache__
+model/__pycache__/
+snapshots/
+pretrained_models/
+.idea/*
+.DS_Store
+.ipynb_checkpoints/

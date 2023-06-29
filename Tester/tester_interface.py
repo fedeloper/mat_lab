@@ -15,10 +15,21 @@ import torch.onnx.utils
 from matplotlib import pyplot as plt
 from tqdm import tqdm
 
-from Tester.tester import get_list, rotate_llh_map, do_test, do_pyramidal_test
+from LightGlue.lightglue import DISK, LightGlue
+from LightGlue.lightglue.utils import load_image, match_pair
+from Tester.tester import get_list, rotate_llh_map, do_test, do_pyramidal_test, normalize_sar
+from lightglue import SuperPoint
 
 
-
+def mnn_mather(desc1, desc2):
+    sim = desc1 @ desc2.transpose()
+    sim[sim < 0.75] = 0
+    nn12 = np.argmax(sim, axis=1)
+    nn21 = np.argmax(sim, axis=0)
+    ids1 = np.arange(0, sim.shape[0])
+    mask = (ids1 == nn21[nn12])
+    matches = np.stack([ids1[mask], nn12[mask]])
+    return matches.transpose()
 class Tester():
     def __init__(self,matcher):
         self.name_model= "No_Name"
@@ -110,12 +121,12 @@ class Tester():
                   size_patch=(480, 360),
                   verbose=False,
                   configs_ransac=[{'min_samples': 0, 'residual_threshold': -1, 'max_trials': 0},
-                                  {'min_samples': 4, 'residual_threshold': 0.5, 'max_trials': 100},
-                                  {'min_samples': 4, 'residual_threshold': 1, 'max_trials': 100},
-                                  {'min_samples': 4, 'residual_threshold': 1.5, 'max_trials': 100},
-                                  {'min_samples': 4, 'residual_threshold': 3, 'max_trials': 100},
-                                  {'min_samples': 4, 'residual_threshold': 5, 'max_trials': 100}],
-                  threshold_inliers=10, random_select=True, angle_rotation=0):
+                                  {'min_samples': 4, 'residual_threshold': 7, 'max_trials': 100},
+                                  {'min_samples': 4, 'residual_threshold': 10, 'max_trials': 100},
+                                  {'min_samples': 4, 'residual_threshold': 15, 'max_trials': 100},
+                                  {'min_samples': 4, 'residual_threshold': 20, 'max_trials': 100},
+                                  {'min_samples': 4, 'residual_threshold': 25, 'max_trials': 100}],
+                  threshold_inliers=1, random_select=True, angle_rotation=0):
 
         path = self.name_model
         if not os.path.exists(path):
@@ -149,14 +160,11 @@ class Tester():
 
             #assert False
             llh = np.load(path_llh_uavsar)
-            min_lat, max_lat = np.min(llh[:, :, 0]), np.max(llh[:, :, 0])
-            min_lon, max_lon = np.min(llh[:, :, 1]), np.max(llh[:, :, 1])
 
             llh, uavsar = rotate_llh_map(uavsar, llh, path_s1)
-            min_lat, max_lat = np.min(llh[:, :, 0]), np.max(llh[:, :, 0])
-            min_lon, max_lon = np.min(llh[:, :, 1]), np.max(llh[:, :, 1])
 
-            s1_norm_log = rasterio.open(path_s1).read()[0, :, :]#normalize_sar(, 97)
+            uavsar = uavsar
+            s1_norm_log = rasterio.open(path_s1).read()[0, :, :]
 
 
 
@@ -282,18 +290,8 @@ def matrix2correspondences(matrix):
     matrix = matrix.permute(0, 2, 3, 1) # equivalent to torch.swapaxes(matrix, 1, -1)
 
     batch, width, height, _ = matrix.shape
-
-    # Create meshgrid of coordinates
-    x = torch.arange(width)
-    y = torch.arange(height)
-    xv, yv = torch.meshgrid(x, y)
-
-    # Repeat xv and yv for the batch size
-    xv_batch = xv.repeat(batch, 1, 1)
-    yv_batch = yv.repeat(batch, 1, 1)
-
-    # Form lst0 and lst1 using reshaping
-    lst0 = torch.stack((xv_batch, yv_batch), dim=-1).reshape(batch, width*height, 2)
+    xv, yv = torch.meshgrid(torch.arange(width), torch.arange(height))
+    lst0 = torch.stack((xv.repeat(batch, 1, 1), yv.repeat(batch, 1, 1)), dim=-1).reshape(batch, width*height, 2)
     lst1 = matrix.reshape(batch, width*height, 2)
 
     return lst0, lst1
@@ -372,6 +370,153 @@ def add_channel(arr):
 
     return new_arr
 from FlowFormer.core.utils import flow_viz
+
+
+
+
+class Tester_Pytorch_d2net(Tester):
+    def __init__(self, matcher, device):
+        super().__init__(matcher)
+        self.name_model = "D2-Net"
+
+        self.matcher = matcher.to(device)  # get_matcher()
+        self.device = device
+
+    def make_inference(self, image0: np.ndarray, image1: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        img0 = torch.as_tensor(image0, device=self.device).repeat(1, 3, 1, 1)
+        img1 = torch.as_tensor(image1, device=self.device).repeat(1, 3, 1, 1)
+
+
+        flow = self.matcher(img0, img1)
+
+        print(flow['dense_features1'].shape, flow['dense_features2'].shape, flow['scores1'].shape,
+              flow['scores2'].shape)
+
+
+
+        return# mkpts0[a], mkpts1[a], mconf[a]
+
+    def make_predicition_for_training(self, image0: Tensor, image1: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+        img0 = torch.as_tensor(image0, device=self.device).repeat(1, 3, 1, 1)
+        img1 = torch.as_tensor(image1, device=self.device).repeat(1, 3, 1, 1)
+
+
+        return# mkpts0, mkpts1, mconf
+
+class Tester_Pytorch_ALIKE(Tester):
+        def __init__(self,matcher,device):
+            super().__init__(matcher)
+            self.name_model = "ALIKE"
+            self.matcher = matcher
+
+           # self.matcher = self.matcher.to(device)#get_matcher()
+            self.device = device
+        def make_inference(self, image0: np.ndarray, image1: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+            img0 = torch.as_tensor(image0, device=self.device).repeat(1, 3, 1, 1).float().squeeze().permute(2, 1, 0)#.permute(0,1,2)
+            img1 = torch.as_tensor(image1, device=self.device).repeat(1, 3, 1, 1).float().squeeze().permute(2, 1, 0)
+
+            pred_ref = self.matcher(img0.cpu().numpy())
+            kpts_ref = pred_ref['keypoints']
+            desc_ref = pred_ref['descriptors']
+
+            pred = self.matcher(img1.cpu().numpy())
+            kpts = pred['keypoints']
+            desc = pred['descriptors']
+
+            matches = mnn_mather(desc_ref, desc)
+
+            mkpts0, mkpts1 = kpts[matches[:, 0]], kpts_ref[matches[:, 1]]
+
+
+
+            # Create the list of tuples
+            mconf = np.full((len(mkpts0),), 0.98)
+
+
+
+
+            return mkpts0, mkpts1, mconf
+        def make_predicition_for_training(self,image0: Tensor, image1: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+
+            img0 = torch.as_tensor(image0, device=self.device).repeat(1, 3, 1, 1)
+            img1 = torch.as_tensor(image1, device=self.device).repeat(1, 3, 1, 1)
+            flow_pre, _ = self.matcher(img0, img1)
+
+            flow_pre_cpu = flow_pre.cpu().squeeze().permute(1, 2, 0).numpy()
+            flow_img = flow_viz.flow_to_image(flow_pre_cpu)
+            plt.imshow(flow_img)
+            plt.show()
+
+            mask = torch.rand_like(flow_pre[0, 0]) > 0.95
+            idx = torch.nonzero(mask)
+
+            # extract correspondence points and confidence values
+            mkpts0 = idx
+            mkpts1 = flow_pre[0, :2, idx[:, 0], idx[:, 1]].T#mkpts0 +
+            mconf = torch.full((len(mkpts0),), 0.98)
+
+
+
+            return mkpts0, mkpts1, mconf
+
+
+class Tester_Pytorch_DFM(Tester):
+    def __init__(self, matcher, device):
+        super().__init__(matcher)
+        self.name_model = "ALIKE"
+        self.matcher = matcher
+        self.device = device
+
+    def make_inference(self, image0: np.ndarray, image1: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        img0 = torch.as_tensor(image0, device=self.device).repeat(1, 3, 1, 1).float().squeeze().cpu().permute(2, 1,
+                                                                                                        0).numpy()#  # .permute(0,1,2)
+        img1 = torch.as_tensor(image1, device=self.device).repeat(1, 3, 1, 1).float().squeeze().cpu().permute(2, 1,
+                                                                                                        0).numpy()#.permute(2, 1, 0)
+
+        H, H_init,  mkpts0, mkpts1  = self.matcher.match(img0,img1)
+
+
+        # Create the list of tuples
+        mconf = np.full((len(mkpts0),), 0.98)
+
+        return mkpts0, mkpts1, mconf
+
+
+
+
+class Tester_Pytorch_LightGlue(Tester):
+    def __init__(self, matcher, device):
+        super().__init__(matcher)
+        self.name_model = "LightGlue"
+        self.matcher = matcher
+        self.device = device
+        self.extractor = DISK(max_num_keypoints=2048).eval().cuda()  # load the extractor
+        self.matcher = LightGlue(pretrained='disk').eval().cuda()  # load the matcher
+
+    def make_inference(self, image0: np.ndarray, image1: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        img0 = torch.as_tensor(image0, device=self.device).repeat(1, 3, 1, 1).float().squeeze().permute(2,1, 0).cpu().numpy()#
+        img1 = torch.as_tensor(image1, device=self.device).repeat(1, 3, 1, 1).float().squeeze().permute(2, 1, 0).cpu().numpy()# .permute(2, 1,     0)
+
+
+
+        # load images to torch and resize to max_edge=1024
+
+        image0, scales0 = load_image(img0, resize=1024)
+        image1, scales1 = load_image(img1, resize=1024)
+
+        # extraction + matching + rescale keypoints to original image size
+        pred = match_pair(self.extractor, self.matcher, image0, image1,
+                          scales0=scales0, scales1=scales1)
+
+        kpts0, kpts1, matches = pred['keypoints0'], pred['keypoints1'], pred['matches']
+        mkpts0, mkpts1 = kpts0[matches[..., 0]], kpts1[matches[..., 1]]
+
+        # Create the list of tuples
+        mconf = np.full((len(mkpts0),), 0.98)
+
+        return mkpts0, mkpts1, mconf
+
+
 class Tester_Pytorch_FlowFormer(Tester):
         def __init__(self,matcher,device):
             super().__init__(matcher)

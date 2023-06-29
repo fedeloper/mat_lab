@@ -68,6 +68,7 @@ class ResNet_VAE(nn.Module):
         self.last_con = nn.Conv2d(2,2,8)
         self.a = nn.Parameter(torch.ones(1))
         self.b = nn.Parameter(torch.ones(1))
+        self.c = nn.Parameter(torch.ones(1))
     def encode(self, x0,x1):
 
         x0 = self.resnet(self.cx0(x0))  # ResNet
@@ -91,15 +92,17 @@ class ResNet_VAE(nn.Module):
         x = self.convTrans6(x)
         x = self.convTrans7(x)
         x = self.convTrans8(x)
-        x = F.interpolate(x, size=(400, 400), mode='bilinear')
-        x = self.last_con(x)* self.b +self.a
-        return x
+
+        x = F.interpolate(self.last_con(x), size=(400, 400), mode='bilinear')
+
+        x = (x+( torch.stack(torch.meshgrid(torch.arange(400), torch.arange(400)), dim=-1).to("cuda").permute(2, 0, 1)/400*self.c)) * self.b + self.a
+
+        return x #+grid
 
     def forward(self, x,y):
         emb = self.encode(x,y)
 
 
         x_reconst = self.decode(emb)#
-        #*800
-        #print(x_reconst[0,0,0,0])
+
         return x_reconst
